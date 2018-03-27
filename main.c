@@ -4,24 +4,23 @@
 #include "stm32f0xx_ll_system.h"
 #include <stm32f0xx.h>
 #include "delay.h"
+#include "math_.h"
 
 void SystemClock_Config(void);
 
 uint32_t timeCounter1, timeCounter2;
-uint32_t ms, sec, min, hour, day, digit, mode;
+uint32_t ms, sec, min, hours, days, months, years, digit;
 uint32_t anode_size, cathode_size;
-uint32_t LED_FPS, LED_ClockCycle, LED_RefreshCycle; /* in seconds */
-uint8_t pointPos;
+uint32_t LED_FPS, LED_ClockCycle, LED_RefreshCycle; /* in miliseconds */
+uint32_t LED_ERROR;
 
 /* LED pin connections:
   1-6 - PB7-PB3, PD2
   7-12 - PB15, PC6-PC9, PF6
   LED pin desctiption:
   A(11), B(7), C(4), D(2), E(1), F(10), G(5), DP(3), D1(12), D2(9), D3(8), D4(6)
+  These parameters should be set manualy
  */
-#define LED_MODE_ms	0x00
-#define LED_MODE_MS	0x01
-#define LED_MODE_HM	0x02
 
 #define PINA		LL_GPIO_PIN_9
 #define PORTA		GPIOC
@@ -66,6 +65,7 @@ typedef struct {
   uint32_t AHBEN;
 } Pin;
 
+/* mask for anode_pins[] */
 typedef struct {
   Pin *pins[9];
   uint8_t mask;
@@ -79,13 +79,13 @@ typedef struct {
 #define F	{PORTF, PINF, AHBENF}
 #define G	{PORTG, PING, AHBENG}
 #define DP	{PORTDP, PINDP, AHBENDP}
-#define END	{0x0,0x0, 0x4}
+#define END	{0xFFFFFFFF,0xFFFFFFFF, 0x4}
 #define D1	{PORTD1, PIND1, AHBEND1}
 #define D2	{PORTD2, PIND2, AHBEND2}
 #define D3	{PORTD3, PIND3, AHBEND3}
 #define D4	{PORTD4, PIND4, AHBEND4}
 
-Digit LED_Digits[10] =
+Digit LED_Digits[11] =
 {
   /*0*/
   { {A, B, C, D, E, F, END}, 0x3F },  
@@ -106,15 +106,31 @@ Digit LED_Digits[10] =
   /*8*/
   { {A, B, C, D, E, F, G, END}, 0x7F }, 
   /*9*/
-  { {A, B, G, F, C, D, END}, 0x6F }
+  { {A, B, G, F, C, D, END}, 0x6F },
+  /* error */
+  { {B, C, E, F, G, END}, 0x76 }
 }; 
 Pin pins_anode[9] = {A, B, C, D, E, F, G, DP, END};
-Pin pins_cathode[5] = {D1, D2, D3, D4, END};
+Pin pins_cathode[5] = {D4, D3, D2, D1, END};
+
+typedef struct {
+  uint8_t name;
+  uint8_t pointPos;
+} Mode;
+
+Mode LED_MODE_TIME_sec_ms = {0x00, 0x08};
+Mode LED_MODE_TIME_min_sec = {0x01, 0x04};
+Mode LED_MODE_TIME_hours_min = {0x02, 0x04};
+Mode LED_MODE_DATE_mon_days = {0x03, 0x04};
+Mode LED_MODE_DATE_years = {0x04, 0x10};
+Mode LED_MODE_test = {0x05, 0x0F};
+Mode LED_MODE_default = {0x06, 0x00}; /*nothing displayed*/
+Mode LED_Mode;
 
 void LED_GPIO_INIT()
 {
   uint8_t i=0;
-  while (pins_anode[i].AHBEN != 0x4)
+  while (pins_anode[i].AHBEN != ((Pin)END).AHBEN)
   {
     if ( ~LL_AHB1_GRP1_IsEnabledClock(pins_anode[i].AHBEN) )
     {
@@ -125,7 +141,7 @@ void LED_GPIO_INIT()
   }
   anode_size = i;
   i = 0;
-  while (pins_cathode[i].AHBEN != 0x4)
+  while (pins_cathode[i].AHBEN != ((Pin)END).AHBEN)
   {
     if ( ~LL_AHB1_GRP1_IsEnabledClock(pins_cathode[i].AHBEN) )
     {
@@ -137,16 +153,36 @@ void LED_GPIO_INIT()
   cathode_size = i;
 }
 
+void LED_INIT(uint8_t fps_, uint32_t clock_cycle_, uint32_t current_time_, uint32_t current_date_)
+{
+  LED_ERROR = 0x0;
+  LED_Mode = LED_MODE_default;
+
+  LED_FPS = fps_;
+  LED_RefreshCycle = 1000/ (LED_FPS*4);
+  LED_ClockCycle = clock_cycle_;
+
+  ms = current_time_%1000;
+  sec = current_time_/1000%100;
+  min = current_time_/100000%100;
+  hours = current_time_/10000000;
+
+  days = current_date_%100;
+  months = current_date_/100%100;
+  years = current_date_/10000;
+}
+
+
 void LED_STATIC_TEST()
 {
   uint8_t i = 0;
-  while (i < anode_size)
+  while (pins_anode[i].AHBEN != ((Pin)END).AHBEN)
   {
     LL_GPIO_SetOutputPin(pins_anode[i].PORT, pins_anode[i].PIN);
     i = i + 1;
   }
   i = 0;
-  while (i < cathode_size)
+  while (pins_cathode[i].AHBEN != ((Pin)END).AHBEN)
   {
     LL_GPIO_ResetOutputPin(pins_cathode[i].PORT, pins_cathode[i].PIN);
     i = i + 1;
@@ -158,104 +194,86 @@ void LED_DYNAMIC_TEST()
   uint8_t i = 0, j = 0;
   while (1)
   {
-    while (i < cathode_size)
+    while (pins_cathode[i].AHBEN != ((Pin)END.AHBEN))
     {
       LL_GPIO_ResetOutputPin(pins_cathode[i].PORT, pins_cathode[i].PIN);
       j = 0;
-      while (j < anode_size)
+      while (pins_anode[j].AHBEN != ((Pin)END).AHBEN )
       {
         LL_GPIO_SetOutputPin(pins_anode[j].PORT, pins_anode[j].PIN);
-        Delay(1);
+        Delay(LED_RefreshCycle);
         LL_GPIO_ResetOutputPin(pins_anode[j].PORT, pins_anode[j].PIN);
         j = j + 1;
       }
       LL_GPIO_SetOutputPin(pins_cathode[i].PORT, pins_cathode[i].PIN);
       i = i + 1;
     }
-    i = cathode_size - 2;
-    while (i > 0)
+    i = i - 1;
+    while (i != 0xFF)
     {
       LL_GPIO_ResetOutputPin(pins_cathode[i].PORT, pins_cathode[i].PIN);
       j = anode_size - 1;
-      while (j != 0)
+      while (j != 0xFF)
       {
         LL_GPIO_SetOutputPin(pins_anode[j].PORT, pins_anode[j].PIN);
-        Delay(1);
+        Delay(LED_RefreshCycle);
         LL_GPIO_ResetOutputPin(pins_anode[j].PORT, pins_anode[j].PIN);
         j = j - 1;
       }
       LL_GPIO_SetOutputPin(pins_cathode[i].PORT, pins_cathode[i].PIN);
       i = i - 1;
     } 
+    i = i + 1;
   }
 }
 
-void LED_TIME_INIT(uint8_t fps_, uint32_t clock_cycle_,  uint64_t current_time_,uint8_t mode_)
+void LED_SET_MODE(Mode mode_)
 {
-  mode = mode_;
-  LED_FPS = fps_;
-  LED_RefreshCycle = 1000/ (LED_FPS*4);
-  LED_ClockCycle = clock_cycle_;
-  ms = current_time_%1000;
-  sec = current_time_%100000/1000;
-  min = current_time_/100000%100;
-  hour = current_time_/10000000;
+  LED_Mode = mode_;
 }
 
-void writeValue(uint8_t value)
+void LED_Refresh(void)
 {
+  uint32_t value;
   uint8_t i = 0;
-  while (i < 8)
+  /* set the value to show according to the mode */
+  if (LED_Mode.name == LED_MODE_test.name) { value = 88888; /*all anodes are ON*/ }
+  else if (LED_Mode.name == LED_MODE_TIME_sec_ms.name) { value =  ms + sec*1000; }
+  else if (LED_Mode.name == LED_MODE_TIME_min_sec.name) { value = sec + min*100; }
+  else if (LED_Mode.name == LED_MODE_TIME_hours_min.name) { value = min + hours*100; }
+  else if (LED_Mode.name == LED_MODE_DATE_mon_days.name) { value = days + months*100; }
+  else if (LED_Mode.name == LED_MODE_DATE_years.name) { value = years; }
+  else if (LED_Mode.name == LED_MODE_default.name) { return; }
+  else {return;}
+  /* turn off previous LED digit */
+  if (!LL_GPIO_IsOutputPinSet(pins_cathode[digit].PORT, pins_cathode[digit].PIN))
+  {
+    LL_GPIO_SetOutputPin(pins_cathode[digit].PORT, pins_cathode[digit].PIN);
+  }
+  digit = (digit+1)%4;
+  /*show the value on the digit*/
+  if (LED_ERROR & 0x01)
+  {
+    value = 0xA;
+  } else {
+    value = value/pow(10,digit)%10; 
+  }
+  while (pins_anode[i].AHBEN != ((Pin)END).AHBEN)
   {
     if ( LED_Digits[value].mask & (1<<i) )
     {
       LL_GPIO_SetOutputPin(pins_anode[i].PORT, pins_anode[i].PIN);
-    } else {   
+    } else if (LL_GPIO_IsOutputPinSet(pins_anode[i].PORT, pins_anode[i].PIN))
+    {
       LL_GPIO_ResetOutputPin(pins_anode[i].PORT, pins_anode[i].PIN);
     }
     i = i + 1;
-  } 
-}
-
-void refreshLED(uint8_t digit)
-{
-  uint32_t value;
-  if ( mode == LED_MODE_ms )
-  { value = ms + sec%10*1000; }
-  else if (mode == LED_MODE_MS)
-  { value = sec + min*100; }
-  else if (mode == LED_MODE_HM)
-  { value = min + hour*100; }
-  switch (digit)
-  {
-    case 0:
-      LL_GPIO_SetOutputPin(((Pin)D1).PORT, ((Pin)D1).PIN);
-      writeValue(value%10);
-      LL_GPIO_ResetOutputPin(((Pin)D4).PORT, ((Pin)D4).PIN);
-      break;
-    case 1:
-      LL_GPIO_SetOutputPin(((Pin)D4).PORT, ((Pin)D4).PIN);
-      writeValue(value%100/10);
-      LL_GPIO_ResetOutputPin(((Pin)D3).PORT, ((Pin)D3).PIN);
-      break;
-    case 2:
-      LL_GPIO_SetOutputPin(((Pin)D3).PORT, ((Pin)D3).PIN);
-      writeValue(value/100%10);
-      if (mode == LED_MODE_MS || mode == LED_MODE_HM)
-      {
-        LL_GPIO_SetOutputPin(((Pin)DP).PORT, ((Pin)DP).PIN);
-      }
-      LL_GPIO_ResetOutputPin(((Pin)D2).PORT, ((Pin)D2).PIN);
-      break;
-    case 3:
-      LL_GPIO_SetOutputPin(((Pin)D2).PORT, ((Pin)D2).PIN);
-      writeValue(value/1000);
-      if (mode == LED_MODE_ms)
-      {
-        LL_GPIO_SetOutputPin(((Pin)DP).PORT, ((Pin)DP).PIN);
-      }
-      LL_GPIO_ResetOutputPin(((Pin)D1).PORT, ((Pin)D1).PIN);
   }
+  if ((1<<digit) & LED_Mode.pointPos)
+  {
+    LL_GPIO_SetOutputPin(((Pin)DP).PORT, ((Pin)DP).PIN); /* show points of the mode */
+  }
+  LL_GPIO_ResetOutputPin(pins_cathode[digit].PORT, pins_cathode[digit].PIN); /* ground cathode of current LED digit */
 }
 
 void updateTime()
@@ -271,12 +289,28 @@ void updateTime()
       sec = sec % 60;
       if ( min > 59 )
       {
-        hour = hour + min / 60;
+        hours = hours + min / 60;
         min = min % 60;
-        if (hour > 23)
+        if (hours > 23)
         {
-          day = day + hour/24;
-          hour = hour % 24;
+          days = days + hours/24;
+          hours = hours % 24;
+          if (days > 31)
+          {
+            months = months + days/32;
+            days = days%32;
+            if (days == 0) { days = 1; }
+            if (months > 11)
+            {
+              years = years + months/12;
+              months = months%12;
+              if (months == 0) { months = 1; }
+              if (years > 9999)
+              {
+                LED_ERROR = 0x1;
+              }
+            }
+          }
         }
       }
     }
@@ -286,7 +320,7 @@ void updateTime()
 void
 SysTick_Handler(void) 
 {
-  //TimingDelay_Decrement();
+  TimingDelay_Decrement();
   timeCounter1 = timeCounter1 + 1;
   timeCounter2 = timeCounter2 + 1;
   if ( timeCounter1 == LED_ClockCycle )
@@ -297,8 +331,7 @@ SysTick_Handler(void)
   if (timeCounter2 == LED_RefreshCycle)
   {
     timeCounter2 = 0;
-    refreshLED(digit);
-    digit = (digit + 1) %4;
+    LED_Refresh();
   }
 } 
 
@@ -306,9 +339,11 @@ int main(void)
 {
   SystemClock_Config();
   LED_GPIO_INIT();
+  LED_INIT(60, 1001, 235959987, 920181131); /*FPS, ClockCycle, CurrTime(hh:mm:ss:msx3), CurrDate(yyyy:mm:dd)*/
   //LED_STATIC_TEST();
+  LED_SET_MODE(LED_MODE_DATE_years);
   //LED_DYNAMIC_TEST();
-  LED_TIME_INIT(120, 1001, 235956789, LED_MODE_HM);
+  // 
   while (1);
 }
 
